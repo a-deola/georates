@@ -159,18 +159,6 @@ export class CountriesService {
       const first = c.currencies[0];
       currency_code = first && first.code ? first.code : null;
     }
-
-    const missing: Record<string, string> = {};
-    if (!name) missing.name = 'is required';
-    if (!population || isNaN(population)) missing.population = 'is required';
-    if (!currency_code) missing.currency_code = 'is required';
-
-    if (Object.keys(missing).length > 0) {
-      throw new HttpException(
-        { error: 'Validation failed', details: missing },
-        HttpStatus.BAD_REQUEST,
-      );
-    }
   }
 
   

@@ -1,6 +1,4 @@
 import { Module } from '@nestjs/common';
-import { AppController } from './app.controller';
-import { AppService } from './app.service';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { CountriesModule } from './countries/countries.module';
 import { StatusController } from './status/status.controller';
@@ -22,7 +20,7 @@ const dbUrl = new URL(process.env.DATABASE_URL);
       ssl: { rejectUnauthorized: false },
       entities: [__dirname + '/**/*.entity{.ts}'],
       autoLoadEntities: true,
-      synchronize: true,
+      synchronize: false,
       logging: true,
     }),
     CountriesModule,
