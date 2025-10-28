@@ -1,6 +1,6 @@
 import { Injectable, HttpException, HttpStatus } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, ILike, Not, IsNull } from 'typeorm';
+import { Repository, ILike, EntityManager, Not, IsNull } from 'typeorm';
 import { Country } from './entities/country.entity';
 import axios from 'axios';
 import * as fs from 'fs/promises';
@@ -82,7 +82,7 @@ export class CountriesService {
     return Math.floor(Math.random() * (max - min + 1)) + min;
   }
 
-  async generateSummaryImage(manager?): Promise<void> {
+  async generateSummaryImage(now, countries, manager?): Promise<void> {
     const top5 = await (
       manager ? manager.getRepository(Country) : this.countryRepository
     ).find({
@@ -90,9 +90,6 @@ export class CountriesService {
       order: { estimated_gdp: 'DESC' },
       take: 5,
     });
-
-    const total = await this.countryRepository.count();
-    const last = new Date().toISOString();
 
     const width = 1200;
     const height = 630;
@@ -107,8 +104,8 @@ export class CountriesService {
     ctx.font = 'bold 36px Arial';
     ctx.fillText(`Countries Summary`, 40, 60);
     ctx.font = '16px Arial';
-    ctx.fillText(`Total countries: ${total}`, 40, 90);
-    ctx.fillText(`Last refreshed: ${last}`, 40, 115);
+    ctx.fillText(`Total countries: ${countries.length}`, 40, 90);
+    ctx.fillText(`Last refreshed: ${now}`, 40, 115);
 
     ctx.fillStyle = '#333';
     ctx.font = 'bold 20px Arial';
@@ -130,13 +127,87 @@ export class CountriesService {
     const buffer = canvas.toBuffer('image/png');
     await fs.writeFile(outPath, buffer);
   }
+  private async processCountries(
+  manager: EntityManager,
+  countries: any[],
+  exchange: any,
+  now: Date,
+): Promise<void> {
+  for (const c of countries) {
+    try {
+      await this.upsertCountry(manager, c, exchange, now);
+    } catch (error) {
+      console.error(`Failed to upsert ${c.name}:`, error.message);
+    }
+  }
+}
+private async upsertCountry(
+  manager: EntityManager,
+  c: any,
+  exchange: any,
+  now: Date,
+): Promise<void> {
+  const name: string = c.name;
+  const capital: string = c.capital ?? null;
+  const region: string = c.region ?? null;
+  const population: number = Number(c.population);
+
+  let currency_code: string | null = null;
+  if (Array.isArray(c.currencies) && c.currencies.length > 0) {
+    const first = c.currencies[0];
+    currency_code = first && first.code ? first.code : null;
+  }
+
+  let exchange_rate: number | null = null;
+  let estimated_gdp: number | null = null;
+
+  if (currency_code && exchange?.rates?.[currency_code]) {
+    exchange_rate = Number(exchange.rates[currency_code]);
+    const multiplier = this.randBetween(1000, 2000);
+    estimated_gdp = (population * multiplier) / exchange_rate;
+  } else {
+    exchange_rate = null;
+    estimated_gdp = 0;
+  }
+
+  const repo = manager.getRepository(Country);
+  const existing = await repo.findOne({ where: { name: ILike(name) } });
+
+  if (existing) {
+    existing.capital = capital;
+    existing.region = region;
+    existing.population = population;
+    existing.currency_code = currency_code;
+    existing.exchange_rate = exchange_rate;
+    existing.estimated_gdp = estimated_gdp;
+    existing.flag_url = c.flag ?? null;
+    existing.last_refreshed_at = now;
+    await repo.save(existing);
+  } else {
+    const ent = repo.create({
+      name,
+      capital,
+      region,
+      population,
+      currency_code,
+      exchange_rate,
+      estimated_gdp,
+      flag_url: c.flag ?? null,
+      last_refreshed_at: now,
+    });
+    await repo.save(ent);
+  }
+}
+
 
  async refreshAll(): Promise<{ total: number; last_refreshed_at: string }> {
+  const now = new Date();
+
   let countries: any[];
   let exchange: any;
 
   try {
-    const data = await this.fetchExternal();
+    const data = await this.fetchExternal(); 
     countries = data.countries;
     exchange = data.exchange;
   } catch (error) {
@@ -149,93 +220,19 @@ export class CountriesService {
     );
   }
 
-  
-  for (const c of countries) {
-    const name: string = c.name;
-    const population: number = Number(c.population);
-    let currency_code: string | null = null;
-
-    if (Array.isArray(c.currencies) && c.currencies.length > 0) {
-      const first = c.currencies[0];
-      currency_code = first && first.code ? first.code : null;
-    }
-  }
-
-  
   try {
-    return await this.countryRepository.manager.transaction(
-      async (manager) => {
-        const now = new Date();
+    return await this.countryRepository.manager.transaction(async (manager) => {
+      await this.processCountries(manager, countries, exchange, now);
+      await this.generateSummaryImage(now, countries, manager);
 
-        for (const c of countries) {
-          const name: string = c.name;
-          const capital: string = c.capital ?? null;
-          const region: string = c.region ?? null;
-          const population: number = Number(c.population);
 
-          let currency_code: string | null = null;
-          if (Array.isArray(c.currencies) && c.currencies.length > 0) {
-            const first = c.currencies[0];
-            currency_code = first && first.code ? first.code : null;
-          }
-
-          let exchange_rate: number | null = null;
-          let estimated_gdp: number | null = null;
-
-          if (!currency_code) {
-            exchange_rate = null;
-            estimated_gdp = 0;
-          } else {
-            const code = currency_code;
-            if (Object.prototype.hasOwnProperty.call(exchange.rates, code)) {
-              exchange_rate = Number(exchange.rates[code]);
-              const multiplier = this.randBetween(1000, 2000);
-              estimated_gdp = (population * multiplier) / exchange_rate;
-            } else {
-              exchange_rate = null;
-              estimated_gdp = null;
-            }
-          }
-
-          const existing = await manager
-            .getRepository(Country)
-            .findOne({ where: { name: ILike(name) } });
-
-          if (existing) {
-            existing.capital = capital;
-            existing.region = region;
-            existing.population = population;
-            existing.currency_code = currency_code;
-            existing.exchange_rate = exchange_rate;
-            existing.estimated_gdp = estimated_gdp;
-            existing.flag_url = c.flag ?? null;
-            existing.last_refreshed_at = now;
-            await manager.save(existing);
-          } else {
-            const ent = manager.getRepository(Country).create({
-              name,
-              capital,
-              region,
-              population,
-              currency_code,
-              exchange_rate,
-              estimated_gdp,
-              flag_url: c.flag ?? null,
-              last_refreshed_at: now,
-            });
-            await manager.save(ent);
-          }
-        }
-
-        await this.generateSummaryImage(manager);
-
-        return {
-          total: countries.length,
-          last_refreshed_at: now.toISOString(),
-        };
-      },
-    );
+      return {
+        total: countries.length,
+        last_refreshed_at: now.toISOString(),
+      };
+    });
   } catch (err) {
+    console.error('Transaction failed:', err);
     throw new HttpException(
       {
         error: 'Internal server error',
@@ -245,6 +242,7 @@ export class CountriesService {
     );
   }
 }
+
 
 
   async findAll(query: any) {
